@@ -1,0 +1,363 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:owner_web/main.dart';
+import 'package:owner_web/models/app_user.dart';
+import 'package:owner_web/models/product.dart';
+import 'package:owner_web/screens/add_product_screen.dart';
+import 'package:owner_web/screens/login_screen.dart';
+import 'package:owner_web/screens/products_screen.dart';
+import 'package:owner_web/screens/sales_list_screen.dart';
+import 'package:owner_web/services/providers.dart';
+import 'package:owner_web/services/wholesale_api_client.dart';
+
+void main() {
+  test(
+    'product creation sends a generated hex ID and retries collisions',
+    () async {
+      final api = _RecordingProductApiClient()..conflictsRemaining = 1;
+      addTearDown(api.close);
+      final repository = ApiRepository(api);
+
+      await repository.createProduct(
+        Product(name: 'Test product', quantity: 3),
+      );
+
+      expect(api.attemptedIds, hasLength(2));
+      expect(api.attemptedIds, everyElement(matches(RegExp(r'^[0-9A-F]{6}$'))));
+      expect(api.attemptedIds[0], isNot(api.attemptedIds[1]));
+    },
+  );
+
+  testWidgets('owner login has no demo bypass and exposes password options', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const ProviderScope(child: MaterialApp(home: LoginScreen())),
+    );
+    await tester.pump();
+
+    expect(find.text('Open demo workspace'), findsNothing);
+    expect(find.text('Remember password'), findsOneWidget);
+    final passwordField = find.byKey(const Key('owner-password'));
+    final editablePassword = find.descendant(
+      of: passwordField,
+      matching: find.byType(EditableText),
+    );
+    expect(tester.widget<EditableText>(editablePassword).obscureText, isTrue);
+    await tester.tap(find.byKey(const Key('owner-password-visibility')));
+    await tester.pump();
+    expect(tester.widget<EditableText>(editablePassword).obscureText, isFalse);
+
+    await tester.ensureVisible(find.text('New Owner? Create an account'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('New Owner? Create an account'));
+    await tester.pump();
+    expect(find.byKey(const Key('owner-register-name')), findsOneWidget);
+    expect(find.text('Remember password'), findsNothing);
+  });
+
+  testWidgets('Owner registration fits a small mobile screen and shows logo', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      const ProviderScope(child: MaterialApp(home: LoginScreen())),
+    );
+    await tester.pump();
+    await tester.ensureVisible(find.text('New Owner? Create an account'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('New Owner? Create an account'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Image), findsOneWidget);
+    expect(find.byKey(const Key('owner-register-name')), findsOneWidget);
+    await tester.ensureVisible(find.text('Create owner account'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('desktop workspace shows account details and scrolls both ways', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 420);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final authRepository = _TestAuthRepository();
+    final apiRepository = _TestApiRepository();
+    addTearDown(authRepository.api.close);
+    addTearDown(apiRepository.api.close);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authRepositoryProvider.overrideWithValue(authRepository),
+          apiRepositoryProvider.overrideWithValue(apiRepository),
+        ],
+        child: const OwnerApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Owner Name'), findsOneWidget);
+    expect(find.text('owner@example.com'), findsOneWidget);
+    expect(find.text('Log out'), findsOneWidget);
+    expect(find.text('Profile'), findsNothing);
+    expect(find.byType(Scrollbar), findsNWidgets(2));
+    expect(find.text('Rice'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Log out'));
+    await tester.pumpAndSettle();
+    expect(find.text('Owner Name'), findsNothing);
+    expect(find.text('Sign in'), findsOneWidget);
+  });
+
+  testWidgets('owner workspace adapts to mobile navigation', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final authRepository = _TestAuthRepository();
+    final apiRepository = _TestApiRepository();
+    addTearDown(authRepository.api.close);
+    addTearDown(apiRepository.api.close);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authRepositoryProvider.overrideWithValue(authRepository),
+          apiRepositoryProvider.overrideWithValue(apiRepository),
+        ],
+        child: const OwnerApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.text('Products'), findsWidgets);
+    expect(find.text('Sales'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('add product form scrolls on a short desktop window', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 420);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const MaterialApp(home: AddProductScreen()));
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('owner-product-id')), findsNothing);
+    await tester.ensureVisible(find.text('Save Product'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.text('Save Product')).bottom,
+      lessThanOrEqualTo(420),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('product list hides IDs with name first and actions last', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProductsScreen(
+            products: [Product(id: 'ABC123', name: 'Rice', quantity: 5)],
+            onAdd: (_) {},
+            onUpdate: (_, _) {},
+            onRestock: (_, _) {},
+            onSetActive: (_, _) {},
+          ),
+        ),
+      ),
+    );
+
+    final columns = tester.widget<DataTable>(find.byType(DataTable)).columns;
+    expect(columns.map((column) => (column.label as Text).data), [
+      'Product name',
+      'Remaining',
+      'Status',
+      'Actions',
+    ]);
+    expect(find.text('ABC123'), findsNothing);
+    expect(find.text('Rice'), findsOneWidget);
+  });
+
+  testWidgets('sales list shows Indian time and status without user ID', (
+    tester,
+  ) async {
+    final sale = Sale(
+      id: 'sale-1',
+      requestId: 'batch-order-1234',
+      invoiceNumber: 'INV-000123',
+      salesman: 'Seller Name',
+      userId: 'private-user-id',
+      store: 'Store',
+      contact: '1234567890',
+      location: 'Kolkata',
+      productId: 'rice',
+      productName: 'Rice',
+      quantity: 2,
+      rate: 50,
+      createdAt: DateTime.utc(2026, 1, 1, 21),
+    );
+    final secondSale = Sale(
+      id: 'sale-2',
+      requestId: 'batch-order-1234',
+      invoiceNumber: 'INV-000123',
+      salesman: 'Seller Name',
+      userId: 'private-user-id',
+      store: 'Store',
+      contact: '1234567890',
+      location: 'Kolkata',
+      productId: 'AB883C',
+      productName: 'Rice',
+      quantity: 3,
+      rate: 80,
+      createdAt: DateTime.utc(2026, 1, 1, 21),
+    );
+    OrderStatus? changedStatus;
+    var invoiceRequested = false;
+    List<Sale>? approvedOrder;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: StatefulBuilder(
+          builder: (context, setState) => Scaffold(
+            body: SalesListScreen(
+              sales: [sale, secondSale],
+              initialRange: DateTimeRange(
+                start: DateTime(2026, 1, 2),
+                end: DateTime(2026, 1, 2),
+              ),
+              onStatusChanged: (order, status) {
+                setState(() {
+                  for (final sale in order) {
+                    sale.orderStatus = status;
+                  }
+                });
+                approvedOrder = order;
+                changedStatus = status;
+              },
+              onDownloadInvoice: (_) async {
+                invoiceRequested = true;
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('02 Jan 2026\n2:30 AM'), findsOneWidget);
+    expect(find.text('User ID'), findsNothing);
+    expect(find.text('private-user-id'), findsNothing);
+    expect(find.text('Pending'), findsOneWidget);
+    final columns = tester.widget<DataTable>(find.byType(DataTable)).columns;
+    expect(columns.map((column) => (column.label as Text).data), [
+      'Date & time',
+      'Invoice #',
+      'Salesman',
+      'Store',
+      'Contact',
+      'Location',
+      'Product',
+      'Qty',
+      'Rate',
+      'Order status',
+      'Action',
+    ]);
+    expect(find.text('INV-000123'), findsOneWidget);
+    expect(find.text('Rice\nRice'), findsOneWidget);
+    expect(find.text('AB883C'), findsNothing);
+    expect(find.text('2\n3'), findsOneWidget);
+    expect(find.text('₹50\n₹80'), findsOneWidget);
+    expect(tester.widget<DataTable>(find.byType(DataTable)).rows, hasLength(1));
+    expect(find.text('Total'), findsNothing);
+    final tableScrollbar = tester.widget<Scrollbar>(find.byType(Scrollbar));
+    expect(tableScrollbar.thumbVisibility, isTrue);
+    expect(tableScrollbar.trackVisibility, isTrue);
+    expect(tableScrollbar.interactive, isTrue);
+    expect(tableScrollbar.controller!.position.maxScrollExtent, greaterThan(0));
+    final approveButton = find.byKey(const ValueKey('approve-order-sale-1'));
+    expect(find.byTooltip('Download invoice PDF'), findsOneWidget);
+    await tester.ensureVisible(approveButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('download-invoice-sale-1')));
+    await tester.pump();
+    expect(invoiceRequested, isTrue);
+    await tester.tap(find.byKey(const ValueKey('approve-order-sale-1')));
+    await tester.pump();
+    expect(changedStatus, OrderStatus.approved);
+    expect(approvedOrder, [sale, secondSale]);
+    expect(find.text('Pending'), findsNothing);
+    expect(find.text('Approved'), findsNWidgets(2));
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('approve-order-sale-1')),
+          )
+          .onPressed,
+      isNull,
+    );
+  });
+}
+
+class _TestAuthRepository extends AuthRepository {
+  _TestAuthRepository() : super(WholesaleApiClient());
+
+  @override
+  Future<AppUser?> restore({required String expectedRole}) async =>
+      const AppUser(
+        id: 'owner-1',
+        email: 'owner@example.com',
+        name: 'Owner Name',
+        role: 'owner',
+      );
+
+  @override
+  Future<void> signOut() async {}
+}
+
+class _TestApiRepository extends ApiRepository {
+  _TestApiRepository() : super(WholesaleApiClient());
+
+  @override
+  Future<ProductPage> products({
+    String query = '',
+    String? cursor,
+    bool forceRefresh = false,
+  }) async =>
+      ProductPage([Product(id: 'rice', name: 'Rice', quantity: 10)], null);
+
+  @override
+  Future<SalePage> sales({
+    DateTime? start,
+    DateTime? end,
+    String? cursor,
+  }) async => const SalePage([], null);
+}
+
+class _RecordingProductApiClient extends WholesaleApiClient {
+  int conflictsRemaining = 0;
+  final attemptedIds = <String>[];
+
+  @override
+  Future<void> createProduct(Map<String, Object?> product) async {
+    attemptedIds.add(product['id']! as String);
+    if (conflictsRemaining > 0) {
+      conflictsRemaining--;
+      throw const ApiException(409, 'Product ID already exists.');
+    }
+  }
+}
